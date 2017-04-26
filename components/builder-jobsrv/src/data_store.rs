@@ -298,7 +298,7 @@ impl DataStore {
     /// * If the dispatched jobs cannot be selected from the database
     pub fn reset_jobs(&self) -> Result<()> {
         let conn = self.pool.get_shard(0)?;
-        let rows = &conn.query("SELECT reset_jobs_v1()", &[])
+        &conn.query("SELECT reset_jobs_v1()", &[])
                         .map_err(Error::JobReset)?;
         Ok(())
     }
