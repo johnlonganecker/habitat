@@ -333,15 +333,20 @@ fn sub_status(m: &ArgMatches) -> Result<()> {
     }
     let cfg = mgrcfg_from_matches(m)?;
     let mut services: Vec<ServiceStatus> = Vec::new();
+    let mut query_one = false;
 
     if Manager::is_running(&cfg)? {
         match m.value_of("PKG_IDENT") {
             Some(pkg) => {
+                query_one = true;
                 match Manager::service_status(cfg, PackageIdent::from_str(pkg)?) {
                     Ok(status) => {
                         services.push(status);
                     }
-                    Err(_) => outputln!("The {} service is not currently loaded.", pkg),
+                    Err(_) => {
+                        outputln!("The {} service is not currently loaded.", pkg);
+                        std::process::exit(5);
+                    }
                 }
             }
             None => services.append(&mut Manager::status(cfg)?),
@@ -356,22 +361,32 @@ fn sub_status(m: &ArgMatches) -> Result<()> {
                               status.supervisor.elapsed.num_seconds())
                 }
                 ProcessState::Down => {
-                    outputln!("The {} service is not currently running.", status.package)
+                    outputln!("The {} service is not currently running.", status.package);
+                    if query_one {
+                        std::process::exit(2);
+                    }
                 }
                 ProcessState::Start => {
                     outputln!("The {} service entered the  starting state {} seconds ago.",
                               status.package,
-                              status.supervisor.elapsed.num_seconds())
+                              status.supervisor.elapsed.num_seconds());
+                    if query_one {
+                        std::process::exit(3);
+                    }
                 }
                 ProcessState::Restart => {
                     outputln!("The {} service entered the restarting state {} seconds ago.",
                               status.package,
-                              status.supervisor.elapsed.num_seconds())
+                              status.supervisor.elapsed.num_seconds());
+                    if query_one {
+                        std::process::exit(4);
+                    }
                 }
             }
         }
     } else {
         outputln!("The supervisor is not running.");
+        std::process::exit(6);
     }
     return Ok(());
 }
