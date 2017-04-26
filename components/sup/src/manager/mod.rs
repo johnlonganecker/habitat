@@ -18,10 +18,12 @@ mod service_updater;
 mod spec_watcher;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::result;
 use std::thread;
 use std::sync::{Arc, RwLock};
 use std::sync::mpsc::channel;
@@ -39,9 +41,12 @@ use hcore::crypto::{default_cache_key_path, SymKey};
 use hcore::fs::FS_ROOT_PATH;
 use hcore::service::ServiceGroup;
 use hcore::os::process;
+use hcore::package::{Identifiable, PackageIdent};
+use hcore::util::deserialize_using_from_str;
 use protobuf::Message;
+use serde;
 use serde_json;
-use time::{SteadyTime, Duration as TimeDuration};
+use time::{self, Timespec, Duration as TimeDuration};
 use toml;
 
 pub use manager::service::{Service, ServiceConfig, ServiceSpec, UpdateStrategy, Topology};
@@ -53,6 +58,7 @@ use config::GossipListenAddr;
 use census::CensusRing;
 use manager::signals::SignalEvent;
 use http_gateway;
+use supervisor::ProcessState;
 
 const MEMBER_ID_FILE: &'static str = "MEMBER_ID";
 const PROC_LOCK_FILE: &'static str = "LOCK";
@@ -64,6 +70,50 @@ lazy_static! {
     pub static ref STATE_PATH_PREFIX: PathBuf = {
         Path::new(&*FS_ROOT_PATH).join("hab/sup")
     };
+}
+
+#[derive(Deserialize)]
+pub struct ServiceStatus {
+    #[serde(deserialize_with = "deserialize_using_from_str")]
+    pub package: PackageIdent,
+    pub supervisor: SupervisorStatus,
+}
+
+#[derive(Deserialize)]
+pub struct SupervisorStatus {
+    pub pid: Option<u32>,
+    #[serde(
+        deserialize_with = "deserialize_time",
+        rename = "state_entered"
+    )]
+    pub elapsed: TimeDuration,
+    pub state: ProcessState,
+}
+
+pub fn deserialize_time<D>(d: D) -> result::Result<TimeDuration, D::Error>
+    where D: serde::Deserializer
+{
+    struct FromTimespec;
+
+    impl serde::de::Visitor for FromTimespec {
+        type Value = TimeDuration;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a i64 integer")
+        }
+
+        fn visit_u64<R>(self, value: u64) -> result::Result<TimeDuration, R>
+            where R: serde::de::Error
+        {
+            let tspec = Timespec {
+                sec: (value as i64),
+                nsec: 0,
+            };
+            Ok(time::get_time() - tspec)
+        }
+    }
+
+    d.deserialize_u64(FromTimespec)
 }
 
 /// FileSystem paths that the Manager uses to persist data to disk.
@@ -124,6 +174,7 @@ pub struct Manager {
     gossip_listen: GossipListenAddr,
     http_listen: http_gateway::ListenAddr,
     organization: Option<String>,
+    service_states: Vec<Timespec>,
 }
 
 impl Manager {
@@ -154,6 +205,26 @@ impl Manager {
         obtain_process_lock(&fs_cfg)?;
 
         Self::new(cfg, member, fs_cfg)
+    }
+
+    pub fn service_status(cfg: ManagerConfig, ident: PackageIdent) -> Result<ServiceStatus> {
+        let services = Self::status(cfg)?;
+
+        for status in services {
+            if status.package.satisfies(&ident) {
+                return Ok(status);
+            }
+        }
+
+        Err(sup_error!(Error::ServiceNotLoaded(ident)))
+    }
+
+    pub fn status(cfg: ManagerConfig) -> Result<Vec<ServiceStatus>> {
+        let state_path = Self::state_path_from(&cfg);
+        let fs_cfg = FsCfg::new(state_path);
+
+        let dat = File::open(&fs_cfg.services_data_path)?;
+        Ok(serde_json::from_reader(&dat)?)
     }
 
     fn new(cfg: ManagerConfig, mut member: Member, fs_cfg: FsCfg) -> Result<Manager> {
@@ -196,6 +267,7 @@ impl Manager {
                gossip_listen: cfg.gossip_listen,
                http_listen: cfg.http_listen,
                organization: cfg.organization,
+               service_states: Vec::new(),
            })
     }
 
@@ -391,7 +463,7 @@ impl Manager {
         let mut service_rumor_offset = 0;
 
         loop {
-            let next_check = SteadyTime::now() + TimeDuration::milliseconds(1000);
+            let next_check = time::get_time() + TimeDuration::milliseconds(1000);
             if self.check_for_incoming_signals() {
                 self.shutdown();
                 return Ok(());
@@ -406,6 +478,10 @@ impl Manager {
                                     &self.butterfly.update_store,
                                     &self.butterfly.member_list);
             service_rumor_offset = 0;
+
+            if self.check_for_changed_services() {
+                self.persist_state();
+            }
 
             if self.census_ring.changed {
                 self.persist_state();
@@ -439,7 +515,7 @@ impl Manager {
                     service_rumor_offset += 1;
                 }
             }
-            let time_to_wait = (next_check - SteadyTime::now()).num_milliseconds();
+            let time_to_wait = (next_check - time::get_time()).num_milliseconds();
             if time_to_wait > 0 {
                 thread::sleep(Duration::from_millis(time_to_wait as u64));
             }
@@ -532,6 +608,22 @@ impl Manager {
             }
         }
         updated_services
+    }
+
+    fn check_for_changed_services(&mut self) -> bool {
+        let mut service_states = Vec::new();
+        for service in self.services
+                .write()
+                .expect("Services lock is poisoned!")
+                .iter_mut() {
+            service_states.push(service.supervisor.state_entered);
+        }
+        if service_states != self.service_states {
+            self.service_states = service_states.clone();
+            true
+        } else {
+            false
+        }
     }
 
     fn persist_state(&self) {

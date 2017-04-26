@@ -57,6 +57,7 @@ use handlebars;
 use hcore::{self, package};
 use hcore::package::Identifiable;
 use notify;
+use serde_json;
 use toml;
 
 use output::StructuredOutput;
@@ -131,7 +132,9 @@ pub enum Error {
     ProcessLockCorrupt,
     ProcessLocked(u32),
     ProcessLockIO(PathBuf, io::Error),
+    SerdeJsonError(serde_json::Error),
     ServiceLoaded(package::PackageIdent),
+    ServiceNotLoaded(package::PackageIdent),
     ServiceSpecFileIO(PathBuf, io::Error),
     ServiceSpecParse(toml::de::Error),
     ServiceSpecRender(toml::ser::Error),
@@ -225,6 +228,8 @@ impl fmt::Display for SupError {
                         path.display(),
                         err)
             }
+            Error::SerdeJsonError(ref e) => format!("Can't deserialize service statust: {}", e),
+            Error::ServiceNotLoaded(ref ident) => format!("Service {} not loaded", ident),
             Error::ServiceLoaded(ref ident) => {
                 format!("Service already loaded, unload '{}' and try again", ident)
             }
@@ -301,6 +306,8 @@ impl error::Error for SupError {
             Error::ProcessLockCorrupt => "Unable to decode contents of process lock",
             Error::ProcessLocked(_) => "Another instance of the Habitat Supervisor is already running",
             Error::ProcessLockIO(_, _) => "Unable to write or read to a process lock",
+            Error::SerdeJsonError(_) => "Can't deserialize service status",
+            Error::ServiceNotLoaded(_) => "Service status called when service not loaded",
             Error::ServiceLoaded(_) => "Service load or start called when service already loaded",
             Error::ServiceSpecFileIO(_, _) => "Unable to write or read to a service spec file",
             Error::ServiceSpecParse(_) => "Service spec could not be parsed successfully",
@@ -383,6 +390,12 @@ impl From<io::Error> for SupError {
 impl From<env::JoinPathsError> for SupError {
     fn from(err: env::JoinPathsError) -> SupError {
         sup_error!(Error::EnvJoinPathsError(err))
+    }
+}
+
+impl From<serde_json::Error> for SupError {
+    fn from(err: serde_json::Error) -> SupError {
+        sup_error!(Error::SerdeJsonError(err))
     }
 }
 

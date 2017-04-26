@@ -92,7 +92,7 @@ pub struct Service {
     last_health_check: Instant,
     #[serde(skip_serializing)]
     manager_fs_cfg: Arc<manager::FsCfg>,
-    supervisor: Supervisor,
+    pub supervisor: Supervisor,
 }
 
 impl Service {
